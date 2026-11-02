@@ -3,7 +3,7 @@ window.FloodsafeBasemap = {
     attach(map) {
         const select = document.getElementById('mapStyle');
         const control = L.control({position: 'topright'});
-        let panel, message, retry, layers = [], timer, generation = 0;
+        let panel, message, retry, active = null, pending = null, timer;
         map.createPane('basemapLabels').style.zIndex = 250;
         map.getPane('basemapLabels').style.pointerEvents = 'none';
         control.onAdd = () => {
@@ -12,10 +12,9 @@ window.FloodsafeBasemap = {
             message = document.createElement('span');
             message.setAttribute('role', 'status');
             retry = document.createElement('button');
-            retry.textContent = 'Retry map';
-            retry.type = 'button';
+            retry.textContent = 'Retry selected map'; retry.type = 'button';
             retry.style.cssText = 'display:block;margin-top:6px';
-            retry.onclick = () => load(select.value);
+            retry.onclick = () => load(select.value, true);
             panel.append(message, retry);
             L.DomEvent.disableClickPropagation(panel);
             L.DomEvent.disableScrollPropagation(panel);
@@ -23,59 +22,71 @@ window.FloodsafeBasemap = {
         };
         control.addTo(map);
         L.control.scale({position: 'bottomright', imperial: false}).addTo(map);
-        function notice(text, canRetry) {
-            panel.hidden = false;
-            message.textContent = text;
-            retry.hidden = !canRetry;
+        function notice(text, canRetry = true) {
+            panel.hidden = false; message.textContent = text; retry.hidden = !canRetry;
         }
-        function load(style, fallback = false) {
-            const token = ++generation;
+        function remove(record) {
+            if (!record) return;
+            // Preserve Leaflet's own remove listeners (including attribution cleanup).
+            map.removeLayer(record.base);
+            if (record.labels) map.removeLayer(record.labels);
+        }
+        function load(style, force = false) {
             clearTimeout(timer);
-            layers.forEach(layer => {layer.off(); map.removeLayer(layer);});
-            layers = [];
-            select.value = style;
-            notice(fallback ? 'Satellite unavailable. Showing street map instead.' : 'Loading map…', false);
+            remove(pending); pending = null;
+            if (active?.style === style && !force) {panel.hidden = true; return;}
             const options = {minZoom: 3, maxZoom: 19, maxNativeZoom: 19,
-                updateWhenIdle: true, updateWhenZooming: false, keepBuffer: 1};
-            if (style === 'satellite') {
-                layers.push(L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                    ...options,
-                    attribution: 'Imagery &copy; <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9">Esri</a>, Maxar, Earthstar Geographics, and the GIS User Community'
-                }));
-                layers.push(L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
-                    ...options, pane: 'basemapLabels', attribution: 'Labels &copy; Esri and contributors'
-                }));
-            } else {
-                layers.push(L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    ...options, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
-                }));
-            }
-            let failed = false, baseErrors = 0;
-            const pending = new Set();
-            const slow = () => {
-                if (token !== generation) return;
-                notice('Map tiles are slow or unavailable. Retry or switch map view. Your scenario is preserved.', true);
-            };
-            layers.forEach((layer, index) => {
-                layer.on('loading', () => {
-                    if (token !== generation) return;
-                    pending.add(layer); clearTimeout(timer); timer = setTimeout(slow, 15000);
-                });
-                layer.on('tileerror', () => {
-                    if (token !== generation) return;
-                    failed = true;
-                    if (style === 'satellite' && index === 0 && ++baseErrors >= 3) {
-                        load('streets', true); return;
-                    }
-                    notice(index === 1 ? 'Some satellite labels could not load. Switch to Streets for place names.' : 'Some map tiles could not load. Retry or switch map view.', true);
-                });
-                layer.on('load', () => {
-                    if (token !== generation) return;
-                    pending.delete(layer);
-                    if (!pending.size) {clearTimeout(timer); if (!failed) panel.hidden = true;}
-                });
-                layer.addTo(map);
+                updateWhenIdle: true, updateWhenZooming: false, keepBuffer: 2,
+                opacity: 0, zIndex: 2};
+            const satellite = style === 'satellite';
+            const record = {style, loaded: 0, errors: 0};
+            record.base = L.tileLayer(satellite
+                ? 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+                : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                ...options, attribution: satellite
+                    ? 'Imagery &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+                    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
             });
+            if (satellite) {
+                record.labels = L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+                    ...options, opacity: 1, pane: 'basemapLabels', attribution: 'Labels &copy; Esri and contributors'
+                });
+                record.labels.on('tileerror', () => {
+                    if (active === record) notice('Satellite is available, but some place labels could not load. Retry or choose Streets.');
+                });
+            }
+            const slow = () => {
+                if (pending !== record) return;
+                notice('The selected map is slow or unavailable.' + (active ? ' Keeping the previous map visible.' : '') + ' Retry or choose another view.');
+            };
+            record.base.on('loading', () => {
+                if (pending !== record && active !== record) return;
+                record.loaded = 0; record.errors = 0;
+                if (pending === record) {clearTimeout(timer); timer = setTimeout(slow, 15000);}
+            });
+            record.base.on('tileload', () => record.loaded++);
+            record.base.on('tileerror', () => record.errors++);
+            record.base.on('load', () => {
+                if (pending !== record && active !== record) return;
+                if (record.errors || !record.loaded) {
+                    if (pending === record) {clearTimeout(timer); slow();}
+                    else notice('Some map tiles could not load. Retry or choose another view.');
+                    return;
+                }
+                if (pending === record) {
+                    clearTimeout(timer);
+                    const previous = active;
+                    active = record; pending = null;
+                    record.base.setOpacity(1).setZIndex(1);
+                    remove(previous);
+                    if (record.labels) record.labels.addTo(map);
+                }
+                panel.hidden = true;
+            });
+            pending = record;
+            notice('Loading ' + (satellite ? 'satellite' : 'streets') + '…' + (active ? ' Keeping the current map visible.' : ''), false);
+            record.base.addTo(map);
+            timer = setTimeout(slow, 15000);
         }
         select.onchange = () => load(select.value);
         load(select.value);
