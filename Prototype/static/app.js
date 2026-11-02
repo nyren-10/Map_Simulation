@@ -1,6 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id), esc = v => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const map = L.map('map').setView([24.5854, 73.7125], 15);
+let searchMarker = null;
 
 // Basemap loading is isolated from scenario setup; network failures cannot
 // prevent drawing, search, or routing controls from being initialized.
@@ -26,6 +27,7 @@ function updateControls() {
     for (const id of ['play', 'restart', 'timeline', 'rate']) $(id).disabled = busy || !result?.routes?.length;
 }
 function resetScenario() {
+    if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; }
     searchSequence++; searchController?.abort(); searchController = null; searching = false; $('searchResults').replaceChildren(); $('searchStatus').textContent = '';
     tool(''); map.closePopup();
     // Stop edit/delete modes before removing their layers.
@@ -37,11 +39,17 @@ function resetScenario() {
     $('clock').textContent = '00:00'; $('timeline').value = 0;
     hint('① Select your area', 'Use the centre-area button, or click Area and drag a rectangle.'); updateControls();
 }
-function navigateTo(lat, lon, name) {
+function navigateTo(lat, lon, name, zoom = 17) {
     if (busy) return false;
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 85 || Math.abs(lon) > 180) { status('This location cannot be displayed. Try a nearby place.', true); return false; }
     if (hasScenario() && !confirm('Changing location will clear the current area, shelters, floods and routes. Continue?')) return false;
-    resetScenario(); map.setView([lat, lon], 14); $('searchResults').replaceChildren(); $('searchStatus').textContent = 'Location: ' + name;
+    resetScenario();
+    const targetZoom = Number.isFinite(zoom) ? Math.max(15, Math.min(19, zoom)) : 17;
+    map.stop().setView([lat, lon], targetZoom, {animate: false});
+    // A circle marker needs no external marker image and never becomes a shelter.
+    searchMarker = L.circleMarker([lat, lon], {radius: 9, color: '#fff', weight: 3, fillColor: '#d34b23', fillOpacity: 1})
+        .bindTooltip(esc(name), {direction: 'top', offset: [0, -10]}).addTo(map);
+    $('searchResults').replaceChildren(); $('searchStatus').textContent = 'Location: ' + name;
     status('Select a new area here to begin.'); return true;
 }
 $('searchForm').onsubmit = async event => {
@@ -59,7 +67,7 @@ $('searchForm').onsubmit = async event => {
         if (!Array.isArray(data.places)) throw Error('The search service returned an invalid response. Please retry.');
         const places = data.places.filter(p => typeof p.name === 'string' && Number.isFinite(p.lat) && Number.isFinite(p.lon) && Math.abs(p.lat) <= 85 && Math.abs(p.lon) <= 180);
         $('searchStatus').textContent = places.length ? 'Choose a result to move the map.' : 'No matching place in India found. Try its full name and city.';
-        for (const place of places) { const button = document.createElement('button'); button.type = 'button'; button.textContent = place.name; button.onclick = () => navigateTo(place.lat, place.lon, place.name); $('searchResults').append(button); }
+        for (const place of places) { const button = document.createElement('button'); button.type = 'button'; button.textContent = place.name; button.onclick = () => navigateTo(place.lat, place.lon, place.name, place.zoom); $('searchResults').append(button); }
     } catch (error) { if (seq === searchSequence) $('searchStatus').textContent = error.name === 'AbortError' ? 'Search timed out. Check your connection and try again.' : error.message; }
     finally { clearTimeout(timeout); if (seq === searchSequence) { searching = false; searchController = null; updateControls(); } }
 };

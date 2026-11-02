@@ -29,6 +29,13 @@ def _get(url,params):
 def _valid(lat,lon):
     return math.isfinite(lat) and math.isfinite(lon) and -85<=lat<=85 and -180<=lon<=180
 
+def _zoom(props):
+    """Frame a selected place closely, rather than fitting a whole district."""
+    kind=str(props.get('osm_value','')).lower()
+    if props.get('osm_key')=='place' or kind=='administrative':
+        return 16 if kind in {'suburb','quarter','neighbourhood','hamlet','village'} else 15
+    return 17 if props.get('osm_key')=='highway' else 18
+
 def _photon(query):
     data=_get(os.environ.get('FLOODSAFE_GEOCODER_URL','https://photon.komoot.io/api/'),{'q':query+' India','lang':'en','limit':15,'bbox':'68,6,98,38'})
     if not isinstance(data,dict) or not isinstance(data.get('features'),list):
@@ -41,7 +48,7 @@ def _photon(query):
             if not isinstance(props,dict):continue
             if str(props.get('countrycode','')).upper()!='IN':continue
             name=', '.join(dict.fromkeys(str(props[k]) for k in ['name','city','state','country'] if props.get(k)))
-            if name and _valid(lat,lon):places.append({'name':name,'lat':lat,'lon':lon})
+            if name and _valid(lat,lon):places.append({'name':name,'lat':lat,'lon':lon,'zoom':_zoom(props)})
         except (KeyError,TypeError,ValueError,IndexError,AttributeError):continue
     return places[:5]
 
@@ -57,7 +64,7 @@ def _cities(query):
             if str(item.get('country_code','')).upper()!='IN':continue
             lat=float(item['latitude']);lon=float(item['longitude'])
             name=', '.join(dict.fromkeys(str(item[k]) for k in ['name','admin1','country'] if item.get(k)))
-            if name and _valid(lat,lon):places.append({'name':name,'lat':lat,'lon':lon})
+            if name and _valid(lat,lon):places.append({'name':name,'lat':lat,'lon':lon,'zoom':15})
         except (KeyError,TypeError,ValueError,AttributeError):continue
     return places[:5]
 
@@ -69,7 +76,7 @@ def find_places(query):
     words=query.casefold().replace('-', ' ').split()
     if ('techno' in words and 'njr' in words) or query.casefold().replace(' ','') in {'technonjr','tinjr'}:
         return [{'name':'Techno India NJR Institute of Technology — campus access, Kaladwas, Udaipur, Rajasthan, India',
-                 'lat':24.5179096,'lon':73.7518783,
+                 'lat':24.5179096,'lon':73.7518783,'zoom':18,
                  'source':'OpenStreetMap named campus access road',
                  'source_url':'https://www.openstreetmap.org/way/1205398059'}]
     with _lock:
