@@ -1,5 +1,9 @@
 """Scenario planning on mapped OSM roads; user supplied demand and shelters."""
 import math
+import logging
+from pathlib import Path
+from tempfile import gettempdir, NamedTemporaryFile
+import os
 from functools import lru_cache
 import h3
 import networkx as nx
@@ -47,7 +51,12 @@ def make_grid(geo, resolution, density):
 def load_roads(boundary_wkt):
     from shapely import wkt
     p = wkt.loads(boundary_wkt)
-    ox.settings.use_cache = True
+    # Deployed application files are read-only. Only temporary storage is writable.
+    runtime_dir = Path(gettempdir()) / 'floodsafe'
+    ox.settings.use_cache = False
+    ox.settings.cache_folder = runtime_dir / 'http-cache'
+    ox.settings.logs_folder = runtime_dir / 'logs'
+    ox.settings.log_file = False
     ox.settings.requests_timeout = 45
     ox.settings.overpass_rate_limit = False
     # A buffer permits routes to leave the selected population area to reach shelters.
@@ -56,7 +65,6 @@ def load_roads(boundary_wkt):
     forward = Transformer.from_crs(4326, epsg, always_xy=True).transform
     back = Transformer.from_crs(epsg, 4326, always_xy=True).transform
     area = transform(back, transform(forward,p).buffer(1200))
-    from pathlib import Path
     from datetime import datetime, timezone
     import hashlib, json
     from road_data import fetch_graph
@@ -72,11 +80,19 @@ def load_roads(boundary_wkt):
             graph=ox.load_graphml(data_dir/'udaipur.graphml')
             graph.graph['road_source']='OpenStreetMap Udaipur snapshot · '+meta['captured_date']
             return graph
-    cache_dir=Path(__file__).parent/'.road_cache'
-    cache_dir.mkdir(exist_ok=True)
-    cache_path=cache_dir/(hashlib.sha256(boundary_wkt.encode()).hexdigest()[:20]+'.graphml')
-    if cache_path.exists():
-        return ox.load_graphml(cache_path)
+    cache_dir = runtime_dir / 'road-cache'
+    cache_path = None
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / (hashlib.sha256(boundary_wkt.encode()).hexdigest()[:20] + '.graphml')
+        if cache_path.exists():
+            try:
+                return ox.load_graphml(cache_path)
+            except Exception:
+                logging.getLogger(__name__).warning('Ignoring unreadable road cache', exc_info=True)
+    except OSError:
+        # A cache is optional: failure must not prevent road download or simulation.
+        logging.getLogger(__name__).warning('Road cache is unavailable; continuing in memory')
     try:
         graph=fetch_graph(area.bounds)
     except Exception as first_error:
@@ -89,7 +105,22 @@ def load_roads(boundary_wkt):
     if graph.number_of_edges()==0:
         raise ValueError('No drivable roads found. Select a neighbourhood with mapped roads.')
     graph.graph['road_source']='OpenStreetMap download · '+datetime.now(timezone.utc).date().isoformat()
-    ox.save_graphml(graph,cache_path)
+    if cache_path is not None:
+        temporary_path = None
+        try:
+            # Atomic replacement prevents parallel requests from reading a partial graph.
+            with NamedTemporaryFile(dir=cache_dir, suffix='.graphml', delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+            ox.save_graphml(graph, temporary_path)
+            os.replace(temporary_path, cache_path)
+        except OSError:
+            logging.getLogger(__name__).warning('Could not save road cache; continuing in memory')
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
     return graph
 
 
