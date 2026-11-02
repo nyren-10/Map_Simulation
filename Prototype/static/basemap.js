@@ -4,7 +4,6 @@ window.FloodsafeBasemap = {
         const select = document.getElementById('mapStyle');
         const control = L.control({position: 'topright'});
         let panel, message, retry, layers = [], timer, generation = 0;
-        map.setMaxZoom(20);
         map.createPane('basemapLabels').style.zIndex = 250;
         map.getPane('basemapLabels').style.pointerEvents = 'none';
         control.onAdd = () => {
@@ -36,7 +35,8 @@ window.FloodsafeBasemap = {
             layers = [];
             select.value = style;
             notice(fallback ? 'Satellite unavailable. Showing street map instead.' : 'Loading map…', false);
-            const options = {maxZoom: 20, maxNativeZoom: 19};
+            const options = {minZoom: 3, maxZoom: 19, maxNativeZoom: 19,
+                updateWhenIdle: true, updateWhenZooming: false, keepBuffer: 1};
             if (style === 'satellite') {
                 layers.push(L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
                     ...options,
@@ -80,9 +80,16 @@ window.FloodsafeBasemap = {
         select.onchange = () => load(select.value);
         load(select.value);
         if (window.ResizeObserver) {
-            const observer = new ResizeObserver(() => map.invalidateSize({pan: false}));
+            let width = 0, height = 0, resizeFrame;
+            const observer = new ResizeObserver(entries => {
+                const box = entries[0].contentRect;
+                if (!box.width || !box.height || (box.width === width && box.height === height)) return;
+                width = box.width; height = box.height;
+                cancelAnimationFrame(resizeFrame);
+                resizeFrame = requestAnimationFrame(() => map.invalidateSize({pan: false, animate: false, debounceMoveend: true}));
+            });
             observer.observe(map.getContainer());
-            map.on('unload', () => {observer.disconnect(); clearTimeout(timer);});
+            map.on('unload', () => {observer.disconnect(); cancelAnimationFrame(resizeFrame); clearTimeout(timer);});
         }
     }
 };

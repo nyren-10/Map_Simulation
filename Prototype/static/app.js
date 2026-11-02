@@ -1,6 +1,13 @@
 'use strict';
 const $ = id => document.getElementById(id), esc = v => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const map = L.map('map').setView([24.5854, 73.7125], 15);
+// Keep vectors, markers and tiles on the same settled projection during rapid
+// wheel/button zooms. Avoid overlapping CSS zoom transforms on slower devices.
+const map = L.map('map', {
+    minZoom: 3, maxZoom: 19,
+    zoomAnimation: false, markerZoomAnimation: false, fadeAnimation: false,
+    zoomSnap: 1, zoomDelta: 1, wheelDebounceTime: 120,
+    wheelPxPerZoomLevel: 120, bounceAtZoomLimits: false
+}).setView([24.5854, 73.7125], 15);
 let searchMarker = null;
 
 // Basemap loading is isolated from scenario setup; network failures cannot
